@@ -576,15 +576,8 @@ int init_serial_port(const char* port)
   // Enable receiver and ignore modem control lines
   tty.c_cflag |= (CREAD | CLOCAL);
 
-  // Set timeout for read operations
-  // VMIN = 0, VTIME > 0 for a read timeout
-  // In this case, 1 second (10 * 0.1s) timeout.
-  tty.c_cc[VMIN] = 0;
-  tty.c_cc[VTIME] = 10;
+  // Port is O_NONBLOCK; read timeouts are handled by select() in get_packet()
 
-  // Below resets the open with O_NONBLOCK
-  //fcntl(fd, F_SETFL, 0);
-  
   // Write the modified settings
   if (tcsetattr(_RS485_fds, TCSANOW, &tty) != 0) {
     LOG(RSSD_LOG,LOG_ERR,"Error %i from tcsetattr: %s\n", errno, strerror(errno));
@@ -602,7 +595,7 @@ int init_serial_port(const char* port)
 /* close tty port */
 void _close_serial_port(int fd)
 {
-  if ( fcntl(fd, F_GETFD, 0) == -1 || errno == EBADF ) {
+  if ( fcntl(fd, F_GETFD, 0) == -1 ) {
     // Looks like bad fd or already closed. return with no error since we can get called twice
     return;
   }
@@ -816,10 +809,8 @@ void send_packet(int fd, unsigned char *packet, int length)
       if (timespec_subtract(&frame_wait_time, &min_frame_wait_time, &elapsed_time)) {
         break;
       }
-    } while (nanosleep(&frame_wait_time, &remainder_time) != 0);
+    } while (nanosleep(&frame_wait_time, &remainder_time) != 0 && errno == EINTR);
   }
-
-  clock_gettime(CLOCK_REALTIME, &now);
 
   if (true) {
     //int nwrite = write(fd, packet, length);
@@ -875,6 +866,7 @@ void send_packet(int fd, unsigned char *packet, int length)
   //if (_aqconfig_.frame_delay > 0) {
 #ifndef RS485MON
   if (_aqconfig_.frame_delay > 0) {
+    clock_gettime(CLOCK_REALTIME, &now);
     timespec_subtract(&elapsed_time, &now, &_last_serial_read_time);
     LOG(RSTM_LOG, LOG_DEBUG, "Time from recv to send is %.3f sec\n",
                             roundf3(timespec2float(&elapsed_time)));
@@ -1285,22 +1277,12 @@ int get_packet(int fd, unsigned char* packet)
   }
 
 
-  if (_aqconfig_.frame_delay > 0 || getLogLevel(RSTM_LOG) >= LOG_DEBUG) {
-    clock_gettime(CLOCK_REALTIME, &packet_end_time);
-    if (getLogLevel(RSTM_LOG) >= LOG_DEBUG) {
-      timespec_subtract(&packet_elapsed, &packet_end_time, &_last_serial_read_time);
-      /*
-      LOG(RSTM_LOG, LOG_NOTICE, "Start sec=%ld nsec=%ld\n",_last_serial_read_time.tv_sec,_last_serial_read_time.tv_nsec);
-      LOG(RSTM_LOG, LOG_NOTICE, "End sec=%ld nsec=%ld\n",packet_end_time.tv_sec,packet_end_time.tv_nsec);
-      LOG(RSTM_LOG, LOG_NOTICE, "Elapsed sec=%ld nsec=%ld Time between packets (%.3f sec)\n",packet_elapsed.tv_sec,packet_elapsed.tv_nsec, roundf3(timespec2float(&packet_elapsed)) );
-      */
-      LOG(RSTM_LOG, LOG_DEBUG, "Time between packets (%.3f sec)\n", roundf3(timespec2float(&packet_elapsed)) );
-
-    }
-    //if (_aqconfig_.frame_delay > 0) {
-    memcpy(&_last_serial_read_time, &packet_end_time, sizeof(struct timespec));
-    //}
+  clock_gettime(CLOCK_REALTIME, &packet_end_time);
+  if (getLogLevel(RSTM_LOG) >= LOG_DEBUG) {
+    timespec_subtract(&packet_elapsed, &packet_end_time, &_last_serial_read_time);
+    LOG(RSTM_LOG, LOG_DEBUG, "Time between packets (%.3f sec)\n", roundf3(timespec2float(&packet_elapsed)) );
   }
+  memcpy(&_last_serial_read_time, &packet_end_time, sizeof(struct timespec));
 
   //clock_gettime(CLOCK_REALTIME, &_last_serial_read_time);
   //}
